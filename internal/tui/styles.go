@@ -46,3 +46,14 @@ var (
 
 	warnStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
 )
+
+var (
+	cursorStyle      = lipgloss.NewStyle().Reverse(true)
+	promptTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("214"))
+	dangerTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("124")).Padding(0, 1)
+	annoStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("108"))
+	okStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	missStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	roBadgeStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("42")).Padding(0, 1)
+	rwBadgeStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("214")).Padding(0, 1)
+)

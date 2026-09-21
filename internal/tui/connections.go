@@ -9,50 +9,191 @@ import (
 	"github.com/zoro/ldapview/internal/store"
 )
 
-type connFormField int
-
 const (
-	fieldName connFormField = iota
-	fieldHost
-	fieldPort
-	fieldTLS
-	fieldBindMethod
-	fieldBindDN
-	fieldCAFile
-	fieldSkipVerify
-	fieldCount
+	cfName = iota
+	cfHost
+	cfPort
+	cfTLS
+	cfBind
+	cfBindDN
+	cfSASL
+	cfCA
+	cfCert
+	cfKey
+	cfSkip
+	cfRO
+	cfTimeout
+	cfSize
+	cfTime
 )
 
 type connectionsModel struct {
-	store    *store.Store
-	cursor   int
-	width    int
-	height   int
-	editing  bool
-	form     [fieldCount]string
-	formIdx  connFormField
-	editName string // non-empty when editing an existing connection
+	store  *store.Store
+	cursor int
+	width  int
+	height int
+	form   *formModel
 }
 
-func newConnectionsModel(s *store.Store) connectionsModel {
-	return connectionsModel{store: s}
-}
+type connFormDoneMsg struct{ name string }
+type deleteConnMsg struct{ name string }
+
+func newConnectionsModel(s *store.Store) connectionsModel { return connectionsModel{store: s} }
 
 func (m *connectionsModel) setSize(w, h int) {
 	m.width, m.height = w, h
+	if m.form != nil {
+		m.form.width, m.form.height = w, h
+	}
+}
+
+func (m connectionsModel) typing() bool { return m.form != nil }
+
+func yn(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
+}
+
+func (m *connectionsModel) openForm(title string, c store.Connection, origName string) {
+	if c.Port == 0 {
+		c.Port = c.DefaultPort()
+	}
+	f := &formModel{title: title, width: m.width, height: m.height}
+	f.fields = make([]formField, 15)
+	f.fields[cfName] = textField("Name", c.Name, "display name for this connection")
+	f.fields[cfHost] = textField("Host", c.Host, "hostname or IP address")
+	f.fields[cfPort] = textField("Port", strconv.Itoa(c.Port), "389 for ldap/StartTLS, 636 for ldaps (3268/3269 for AD global catalog)")
+	tm := string(c.TLSMode)
+	if tm == "" {
+		tm = string(store.TLSNone)
+	}
+	f.fields[cfTLS] = choiceField("TLS mode", []string{"none", "starttls", "ldaps"}, tm)
+	bm := string(c.BindMethod)
+	if bm == "" {
+		bm = string(store.BindAnonymous)
+	}
+	f.fields[cfBind] = choiceField("Bind method", []string{"anonymous", "simple", "sasl"}, bm)
+	f.fields[cfBindDN] = textField("Bind DN / user", c.BindDN, "simple: DN.  NTLM: DOMAIN\\user or user@domain")
+	f.fields[cfSASL] = choiceField("SASL mechanism", []string{"DIGEST-MD5", "NTLM", "EXTERNAL"}, c.SASLMech)
+	f.fields[cfCA] = textField("CA file (PEM)", c.CAFile, "extra trusted CA bundle; preferred over skipping verification")
+	f.fields[cfCert] = textField("Client cert (PEM)", c.ClientCert, "for SASL EXTERNAL / mutual TLS")
+	f.fields[cfKey] = textField("Client key (PEM)", c.ClientKey, "")
+	f.fields[cfSkip] = choiceField("Skip TLS verify", []string{"no", "yes"}, yn(c.SkipVerify))
+	f.fields[cfRO] = choiceField("Read-only", []string{"no", "yes"}, yn(c.ReadOnly))
+	to, sz, tl := c.TimeoutSec, c.SizeLimit, c.TimeLimit
+	if to == 0 {
+		to = 10
+	}
+	if sz == 0 {
+		sz = 1000
+	}
+	if tl == 0 {
+		tl = 10
+	}
+	f.fields[cfTimeout] = textField("Timeout (s)", strconv.Itoa(to), "connect timeout")
+	f.fields[cfSize] = textField("Size limit", strconv.Itoa(sz), "default search size limit (0 = server default)")
+	f.fields[cfTime] = textField("Time limit (s)", strconv.Itoa(tl), "default search time limit")
+	f.footer = "tab move  ←/→ choices  ctrl+s save  esc cancel   (passwords are never saved)"
+
+	refresh := func(fm *formModel) {
+		fm.notice = ""
+		switch {
+		case fm.fields[cfSkip].value() == "yes" && fm.fields[cfTLS].value() != "none":
+			fm.notice = "WARNING: certificate verification disabled — vulnerable to man-in-the-middle attacks."
+		case fm.fields[cfTLS].value() == "none" && fm.fields[cfBind].value() != "anonymous":
+			fm.notice = "WARNING: credentials will be sent unencrypted over plaintext LDAP. Prefer StartTLS or LDAPS."
+		}
+	}
+	refresh(f)
+	f.onEdit = func(fm *formModel, idx int) {
+		if idx == cfTLS {
+			p := strings.TrimSpace(fm.fields[cfPort].in.String())
+			if p == "389" || p == "636" || p == "" {
+				if fm.fields[cfTLS].value() == "ldaps" {
+					fm.fields[cfPort].in.Set("636")
+				} else {
+					fm.fields[cfPort].in.Set("389")
+				}
+			}
+		}
+		refresh(fm)
+	}
+	store_ := m.store
+	f.submit = func(v []string) tea.Cmd {
+		name, host := strings.TrimSpace(v[cfName]), strings.TrimSpace(v[cfHost])
+		if name == "" || host == "" {
+			return statusCmd("name and host are required", true)
+		}
+		port, err := strconv.Atoi(strings.TrimSpace(v[cfPort]))
+		if err != nil || port <= 0 || port > 65535 {
+			return statusCmd("invalid port", true)
+		}
+		atoi := func(s string) int { n, _ := strconv.Atoi(strings.TrimSpace(s)); return n }
+		nc := store.Connection{
+			Name: name, Host: host, Port: port,
+			TLSMode: store.TLSMode(v[cfTLS]), BindMethod: store.BindMethod(v[cfBind]),
+			BindDN: strings.TrimSpace(v[cfBindDN]), SASLMech: v[cfSASL],
+			CAFile: strings.TrimSpace(v[cfCA]), ClientCert: strings.TrimSpace(v[cfCert]), ClientKey: strings.TrimSpace(v[cfKey]),
+			SkipVerify: v[cfSkip] == "yes", ReadOnly: v[cfRO] == "yes",
+			TimeoutSec: atoi(v[cfTimeout]), SizeLimit: atoi(v[cfSize]), TimeLimit: atoi(v[cfTime]),
+		}
+		if nc.BindMethod != store.BindSASL {
+			nc.SASLMech = ""
+		}
+		if origName != "" && origName != name {
+			store_.Delete(origName)
+		}
+		store_.Upsert(nc)
+		if err := store_.Save(); err != nil {
+			return statusCmd("save failed: "+err.Error(), true)
+		}
+		return tea.Batch(msgCmd(connFormDoneMsg{name: name}), statusCmd(fmt.Sprintf("saved %q", name), false))
+	}
+	m.form = f
 }
 
 func (m connectionsModel) update(msg tea.Msg) (connectionsModel, tea.Cmd) {
-	keyMsg, ok := msg.(tea.KeyMsg)
-	if !ok {
+	switch msg := msg.(type) {
+	case connFormDoneMsg, formCancelMsg:
+		m.form = nil
+		if d, ok := msg.(connFormDoneMsg); ok {
+			for i, c := range m.store.Connections {
+				if c.Name == d.name {
+					m.cursor = i
+				}
+			}
+		}
 		return m, nil
+	case deleteConnMsg:
+		m.store.Delete(msg.name)
+		_ = m.store.Save()
+		if m.cursor >= len(m.store.Connections) && m.cursor > 0 {
+			m.cursor--
+		}
+		return m, statusCmd(fmt.Sprintf("deleted %q", msg.name), false)
+	case tea.KeyMsg:
+		if m.form != nil {
+			f, cmd := m.form.update(msg)
+			m.form = &f
+			return m, cmd
+		}
+		return m.handleKey(msg)
 	}
+	return m, nil
+}
 
-	if m.editing {
-		return m.updateForm(keyMsg)
+func (m connectionsModel) selected() (store.Connection, bool) {
+	if m.cursor < 0 || m.cursor >= len(m.store.Connections) {
+		return store.Connection{}, false
 	}
+	return m.store.Connections[m.cursor], true
+}
 
-	switch keyMsg.String() {
+func (m connectionsModel) handleKey(k tea.KeyMsg) (connectionsModel, tea.Cmd) {
+	c, has := m.selected()
+	switch k.String() {
 	case "j", "down":
 		if m.cursor < len(m.store.Connections)-1 {
 			m.cursor++
@@ -62,25 +203,29 @@ func (m connectionsModel) update(msg tea.Msg) (connectionsModel, tea.Cmd) {
 			m.cursor--
 		}
 	case "n":
-		m.startNew()
+		m.openForm("New connection", store.Connection{Port: 389}, "")
 	case "e":
-		if len(m.store.Connections) > 0 {
-			m.startEdit(m.store.Connections[m.cursor])
+		if has {
+			m.openForm("Edit connection: "+c.Name, c, c.Name)
+		}
+	case "D":
+		if has {
+			c.Name += " (copy)"
+			m.openForm("Duplicate connection", c, "")
 		}
 	case "d":
-		if len(m.store.Connections) > 0 {
-			name := m.store.Connections[m.cursor].Name
-			m.store.Delete(name)
-			_ = m.store.Save()
-			if m.cursor >= len(m.store.Connections) && m.cursor > 0 {
-				m.cursor--
-			}
-			return m, statusCmd(fmt.Sprintf("deleted %q", name), false)
+		if has {
+			name := c.Name
+			return m, openOverlay(&confirmOverlay{title: "Delete saved connection", lines: []string{name, c.URL()}, danger: true,
+				yes: func() tea.Cmd { return msgCmd(deleteConnMsg{name: name}) }})
+		}
+	case "t":
+		if has {
+			return m, msgCmd(connectRequestMsg{conn: c, test: true})
 		}
 	case "enter":
-		if len(m.store.Connections) > 0 {
-			conn := m.store.Connections[m.cursor]
-			return m, func() tea.Msg { return connectRequestMsg{conn: conn} }
+		if has {
+			return m, msgCmd(connectRequestMsg{conn: c})
 		}
 	case "q":
 		return m, tea.Quit
@@ -88,195 +233,46 @@ func (m connectionsModel) update(msg tea.Msg) (connectionsModel, tea.Cmd) {
 	return m, nil
 }
 
-func (m *connectionsModel) startNew() {
-	m.editing = true
-	m.editName = ""
-	m.form = [fieldCount]string{
-		fieldPort:       "389",
-		fieldTLS:        string(store.TLSNone),
-		fieldBindMethod: string(store.BindAnonymous),
-		fieldSkipVerify: "no",
-	}
-	m.formIdx = fieldName
-}
-
-func (m *connectionsModel) startEdit(c store.Connection) {
-	m.editing = true
-	m.editName = c.Name
-	m.form = [fieldCount]string{
-		fieldName:       c.Name,
-		fieldHost:       c.Host,
-		fieldPort:       strconv.Itoa(c.DefaultPort()),
-		fieldTLS:        string(c.TLSMode),
-		fieldBindMethod: string(c.BindMethod),
-		fieldBindDN:     c.BindDN,
-		fieldCAFile:     c.CAFile,
-		fieldSkipVerify: yesNo(c.SkipVerify),
-	}
-	m.formIdx = fieldName
-}
-
-func (m connectionsModel) updateForm(msg tea.KeyMsg) (connectionsModel, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.editing = false
-		return m, nil
-	case "tab", "down":
-		m.formIdx = (m.formIdx + 1) % fieldCount
-	case "shift+tab", "up":
-		m.formIdx = (m.formIdx - 1 + fieldCount) % fieldCount
-	case "left", "right":
-		if m.formIdx == fieldTLS {
-			m.form[fieldTLS] = cycleTLS(m.form[fieldTLS], msg.String() == "right")
-		} else if m.formIdx == fieldBindMethod {
-			m.form[fieldBindMethod] = cycleBind(m.form[fieldBindMethod], msg.String() == "right")
-		} else if m.formIdx == fieldSkipVerify {
-			m.form[fieldSkipVerify] = yesNo(m.form[fieldSkipVerify] != "yes")
-		}
-	case "enter":
-		return m.submitForm()
-	case "backspace":
-		f := m.form[m.formIdx]
-		if len(f) > 0 {
-			m.form[m.formIdx] = f[:len(f)-1]
-		}
-	default:
-		if m.formIdx != fieldTLS && m.formIdx != fieldBindMethod && m.formIdx != fieldSkipVerify && len(msg.Runes) > 0 {
-			m.form[m.formIdx] += string(msg.Runes)
-		}
-	}
-	return m, nil
-}
-
-func yesNo(b bool) string {
-	if b {
-		return "yes"
-	}
-	return "no"
-}
-
-func cycleTLS(cur string, forward bool) string {
-	order := []string{string(store.TLSNone), string(store.TLSStartTLS), string(store.TLSImplicit)}
-	return cycleStr(order, cur, forward)
-}
-
-func cycleBind(cur string, forward bool) string {
-	order := []string{string(store.BindAnonymous), string(store.BindSimple), string(store.BindSASL)}
-	return cycleStr(order, cur, forward)
-}
-
-func cycleStr(order []string, cur string, forward bool) string {
-	idx := 0
-	for i, v := range order {
-		if v == cur {
-			idx = i
-		}
-	}
-	if forward {
-		idx = (idx + 1) % len(order)
-	} else {
-		idx = (idx - 1 + len(order)) % len(order)
-	}
-	return order[idx]
-}
-
-func (m connectionsModel) submitForm() (connectionsModel, tea.Cmd) {
-	name := strings.TrimSpace(m.form[fieldName])
-	host := strings.TrimSpace(m.form[fieldHost])
-	if name == "" || host == "" {
-		return m, statusCmd("name and host are required", true)
-	}
-	port, err := strconv.Atoi(strings.TrimSpace(m.form[fieldPort]))
-	if err != nil || port <= 0 {
-		return m, statusCmd("invalid port", true)
-	}
-	c := store.Connection{
-		Name:       name,
-		Host:       host,
-		Port:       port,
-		TLSMode:    store.TLSMode(m.form[fieldTLS]),
-		BindMethod: store.BindMethod(m.form[fieldBindMethod]),
-		BindDN:     strings.TrimSpace(m.form[fieldBindDN]),
-		CAFile:     strings.TrimSpace(m.form[fieldCAFile]),
-		SkipVerify: m.form[fieldSkipVerify] == "yes",
-		TimeoutSec: 10,
-		SizeLimit:  1000,
-		TimeLimit:  10,
-	}
-	// If renaming, delete the old entry first.
-	if m.editName != "" && m.editName != name {
-		m.store.Delete(m.editName)
-	}
-	m.store.Upsert(c)
-	if err := m.store.Save(); err != nil {
-		return m, statusCmd(fmt.Sprintf("save failed: %s", err), true)
-	}
-	m.editing = false
-	return m, statusCmd(fmt.Sprintf("saved %q", name), false)
-}
-
 func (m connectionsModel) view() string {
-	var b strings.Builder
-	b.WriteString(titleStyle.Render("ldapview — Connections"))
-	b.WriteString("\n\n")
-
-	if m.editing {
-		return b.String() + m.formView()
+	if m.form != nil {
+		return m.form.view()
 	}
-
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("ldapview — connections") + "\n\n")
 	if len(m.store.Connections) == 0 {
-		b.WriteString(dimStyle.Render("No saved connections yet. Press 'n' to add one.\n"))
+		b.WriteString(dimStyle.Render("  No saved connections yet. Press n to add one.\n"))
 	}
 	for i, c := range m.store.Connections {
-		marker := "[ ]"
-		line := fmt.Sprintf("%s %s\n    %s", marker, c.Name, c.URL())
+		tags := []string{string(c.TLSMode)}
+		if c.TLSMode == "" || c.TLSMode == store.TLSNone {
+			tags = []string{"plaintext"}
+		}
+		bm := string(c.BindMethod)
+		if bm == "" {
+			bm = "anonymous"
+		}
+		if c.BindMethod == store.BindSASL {
+			bm += ":" + c.SASLMech
+		}
+		tags = append(tags, bm)
+		if c.SkipVerify {
+			tags = append(tags, "no-verify")
+		}
+		if c.ReadOnly {
+			tags = append(tags, "read-only")
+		}
+		line := fmt.Sprintf("  %-24s %s", truncate(c.Name, 24), c.URL())
+		detail := "      " + strings.Join(tags, " · ")
+		if c.BindDN != "" {
+			detail += " · " + c.BindDN
+		}
 		if i == m.cursor {
-			b.WriteString(selectedStyle.Render(fmt.Sprintf("%s %s", marker, c.Name)))
-			b.WriteString("\n")
-			b.WriteString(dimStyle.Render("    " + c.URL()))
-			b.WriteString("\n")
+			b.WriteString(selectedStyle.Render(truncate(line, m.width-1)) + "\n")
+			b.WriteString(dimStyle.Render(truncate(detail, m.width-1)) + "\n")
 		} else {
-			b.WriteString(line)
-			b.WriteString("\n")
+			b.WriteString(truncate(line, m.width-1) + "\n" + dimStyle.Render(truncate(detail, m.width-1)) + "\n")
 		}
 	}
-	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("n new  e edit  d delete  enter connect  q quit"))
-	return b.String()
-}
-
-func (m connectionsModel) formView() string {
-	labels := []string{"Name", "Host", "Port", "TLS Mode", "Bind Method", "Bind DN", "CA file (PEM)", "Skip TLS verify"}
-	var b strings.Builder
-	title := "New Connection"
-	if m.editName != "" {
-		title = "Edit Connection: " + m.editName
-	}
-	b.WriteString(titleStyle.Render(title))
-	b.WriteString("\n\n")
-	for i := connFormField(0); i < fieldCount; i++ {
-		cursor := "  "
-		if i == m.formIdx {
-			cursor = "> "
-		}
-		val := m.form[i]
-		if i == fieldTLS || i == fieldBindMethod || i == fieldSkipVerify {
-			val = "< " + val + " >"
-		}
-		line := fmt.Sprintf("%s%-16s %s", cursor, labels[i]+":", val)
-		if i == m.formIdx {
-			b.WriteString(selectedStyle.Render(line))
-		} else {
-			b.WriteString(line)
-		}
-		b.WriteString("\n")
-	}
-	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("tab/shift+tab move  left/right cycle  enter save  esc cancel"))
-	b.WriteString("\n")
-	if m.form[fieldSkipVerify] == "yes" {
-		b.WriteString(warnStyle.Render("WARNING: certificate verification disabled — vulnerable to MITM. Prefer a CA file.") + "\n")
-	}
-	b.WriteString(dimStyle.Render("password is never saved — you'll be prompted each time you connect"))
+	b.WriteString("\n" + dimStyle.Render("enter connect  t test  n new  e edit  D duplicate  d delete  ? help  q quit"))
 	return b.String()
 }

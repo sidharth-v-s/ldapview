@@ -51,3 +51,31 @@ func TestLooksBinary(t *testing.T) {
 		t.Fatal("plain text should not be binary")
 	}
 }
+
+func TestEncodeSIDGUIDRoundTrip(t *testing.T) {
+	for _, s := range []string{"S-1-5-21-1-2-3-500", "S-1-5-32-544", "S-1-1-0"} {
+		b, err := EncodeSID(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := DecodeObjectSID(b); got != s {
+			t.Fatalf("SID roundtrip %s -> %s", s, got)
+		}
+	}
+	for _, bad := range []string{"", "X-1-5", "S-1", "S-1-5-abc", "S-1-5-99999999999"} {
+		if _, err := EncodeSID(bad); err == nil {
+			t.Fatalf("%q should fail", bad)
+		}
+	}
+	g := "33221100-5544-7766-8899-aabbccddeeff"
+	b, err := EncodeGUID(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := DecodeObjectGUID(b); got != g {
+		t.Fatalf("GUID roundtrip %s", got)
+	}
+	if EscapeBinaryFilter([]byte{0x01, 0xff}) != `\01\ff` {
+		t.Fatal("escape")
+	}
+}

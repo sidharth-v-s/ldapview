@@ -2,8 +2,9 @@ package tui
 
 import (
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/zoro/ldapview/internal/ad"
 	"github.com/zoro/ldapview/internal/ldapclient"
-	"github.com/zoro/ldapview/internal/model"
+	"github.com/zoro/ldapview/internal/schema"
 	"github.com/zoro/ldapview/internal/store"
 )
 
@@ -16,57 +17,138 @@ func statusCmd(text string, isErr bool) tea.Cmd {
 	return func() tea.Msg { return statusMsg{text: text, isErr: isErr} }
 }
 
-// connectRequestMsg is emitted when the user picks a connection to open;
-// it routes to the password prompt screen.
+func msgCmd(m tea.Msg) tea.Cmd { return func() tea.Msg { return m } }
+
+// cmdMsg carries a palette command line.
+type cmdMsg struct{ line string }
+
 type connectRequestMsg struct {
 	conn store.Connection
+	test bool
 }
 
-// doConnectMsg is emitted once the password prompt is submitted (or
-// skipped for anonymous binds), carrying the password only in memory.
 type doConnectMsg struct {
 	conn     store.Connection
 	password string
+	test     bool
 }
 
 type connectResultMsg struct {
 	client *ldapclient.Client
+	conn   store.Connection
 	err    error
+	test   bool
+	warns  []string
+	info   []string
 }
 
-func (a App) performConnect(conf store.Connection, password string) tea.Cmd {
-	return func() tea.Msg {
-		client, err := ldapclient.Connect(conf)
-		if err != nil {
-			return connectResultMsg{err: err}
-		}
-		if err := client.Bind(password); err != nil {
-			client.Close()
-			return connectResultMsg{err: err}
-		}
-		return connectResultMsg{client: client}
-	}
-}
+type cancelPromptMsg struct{}
+type disconnectMsg struct{}
+type backMsg struct{}
 
-type openRootDSEMsg struct {
-	dse *ldapclient.RootDSE
-}
+type openScreenMsg struct{ s screen }
 
-type openSearchMsg struct {
-	base string
-}
+// gotoMsg asks the browser to reveal and load a DN.
+type gotoMsg struct{ dn string }
 
 type openBinaryMsg struct {
 	attrName string
 	data     []byte
 }
 
-type backToBrowserMsg struct{}
+type openRootDSEMsg struct{}
+type openSearchMsg struct {
+	base   string
+	filter string
+}
+type openSchemaMsg struct{ query string }
+type openFilterMsg struct{ raw string }
+type applyFilterMsg struct{ filter string }
+type openReferralMsg struct{ url string }
 
-type disconnectMsg struct{}
-
-type opLogMsg struct {
-	op model.Operation
+// browser data
+type rootsLoadedMsg struct {
+	dse   *ldapclient.RootDSE
+	roots []string
+	err   error
 }
 
-type cancelPromptMsg struct{}
+type childrenLoadedMsg struct {
+	dn       string
+	children []ldapclient.Child
+	err      error
+}
+
+type entryLoadedMsg struct {
+	entry *ldapclient.Entry
+	err   error
+}
+
+type relLoadedMsg struct {
+	dn      string
+	reverse []string
+	err     error
+}
+
+type sdLoadedMsg struct {
+	dn  string
+	sd  *ad.SD
+	err error
+}
+
+type schemaLoadedMsg struct {
+	s   *schema.Schema
+	err error
+}
+
+type needSchemaMsg struct{}
+
+// write requests emitted by the browser
+type editValueMsg struct{ dn, attr, old string }
+type addValueMsg struct{ dn, attr string }
+type delValueMsg struct{ dn, attr, val string }
+type deleteEntryMsg struct{ dn string }
+type addEntryMsg struct{ parent string }
+type modDNMsg struct{ dn string }
+type exportEntryMsg struct {
+	path  string
+	entry *ldapclient.Entry
+}
+
+// opDoneMsg reports a completed directory operation.
+type opDoneMsg struct {
+	desc            string
+	failDesc        string // wording for the failure message ("delete X")
+	err             error
+	refreshEntry    string   // DN whose entry to reload
+	refreshChildren []string // DNs whose children to reload
+	selectDN        string
+	clearEntry      bool
+}
+
+type searchDoneMsg struct {
+	out  *ldapclient.SearchOutcome
+	err  error
+	page int
+}
+
+type importDoneMsg struct {
+	applied, total int
+	err            error
+}
+
+type diffMsg struct{}
+
+type openExtOpMsg struct{ oid string }
+type openFollowReferralMsg struct{ url string }
+
+type referralConnectedMsg struct {
+	client              *ldapclient.Client
+	conn                store.Connection
+	base, scope, filter string
+}
+
+type refChoice struct {
+	url    string
+	follow bool
+}

@@ -91,3 +91,51 @@ func DecodeObjectGUID(b []byte) (string, error) {
 	}
 	return u.String(), nil
 }
+
+// EncodeSID converts "S-1-5-21-..." into its binary form (inverse of DecodeObjectSID).
+func EncodeSID(s string) ([]byte, error) {
+	parts := strings.Split(strings.TrimSpace(s), "-")
+	if len(parts) < 3 || !strings.EqualFold(parts[0], "S") {
+		return nil, fmt.Errorf("not a SID: %q", s)
+	}
+	var rev, auth uint64
+	if _, err := fmt.Sscanf(parts[1], "%d", &rev); err != nil || rev > 255 {
+		return nil, fmt.Errorf("bad SID revision in %q", s)
+	}
+	if _, err := fmt.Sscanf(parts[2], "%d", &auth); err != nil || auth >= 1<<48 {
+		return nil, fmt.Errorf("bad SID authority in %q", s)
+	}
+	subs := parts[3:]
+	if len(subs) > 15 {
+		return nil, fmt.Errorf("too many sub-authorities")
+	}
+	b := []byte{byte(rev), byte(len(subs)), byte(auth >> 40), byte(auth >> 32), byte(auth >> 24), byte(auth >> 16), byte(auth >> 8), byte(auth)}
+	for _, p := range subs {
+		var v uint64
+		if _, err := fmt.Sscanf(p, "%d", &v); err != nil || v > 0xFFFFFFFF {
+			return nil, fmt.Errorf("bad SID sub-authority %q", p)
+		}
+		b = binary.LittleEndian.AppendUint32(b, uint32(v))
+	}
+	return b, nil
+}
+
+// EncodeGUID converts a GUID string to Active Directory's mixed-endian
+// binary form (inverse of DecodeObjectGUID).
+func EncodeGUID(s string) ([]byte, error) {
+	u, err := uuid.Parse(strings.TrimSpace(s))
+	if err != nil {
+		return nil, fmt.Errorf("not a GUID: %q", s)
+	}
+	b := u[:]
+	return []byte{b[3], b[2], b[1], b[0], b[5], b[4], b[7], b[6], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]}, nil
+}
+
+// EscapeBinaryFilter renders bytes as \xx escapes for use in a filter value.
+func EscapeBinaryFilter(b []byte) string {
+	var sb strings.Builder
+	for _, c := range b {
+		fmt.Fprintf(&sb, "\\%02x", c)
+	}
+	return sb.String()
+}
